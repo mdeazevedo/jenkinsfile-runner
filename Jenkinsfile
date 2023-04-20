@@ -1,79 +1,18 @@
-/* Only keep the 10 most recent builds. */
-properties([[$class: 'BuildDiscarderProperty',
-                strategy: [$class: 'LogRotator', numToKeepStr: '10']]])
-
-// TODO: Move it to Jenkins Pipeline Library
-
-def branchName = currentBuild.projectName
-def buildNumber = currentBuild.number
-
-/* These platforms correspond to labels in ci.jenkins.io, see:
- *  https://github.com/jenkins-infra/documentation/blob/master/ci.adoc
- */
-List platforms = ['linux']
-Map branches = [:]
-
-for (int i = 0; i < platforms.size(); ++i) {
-    String label = platforms[i]
-    branches[label] = {
-        node(label + " && docker") {
-            timestamps {
-                ws("platform_${label}_${branchName}_${buildNumber}") {
-                    stage('Checkout') {
-                        checkout scm
-                    }
-
-                    stage('Build') {
-                        timeout(60) {
-                            infra.runMaven(['clean', 'install', '-Dset.changelist', '-Dmaven.test.failure.ignore=true', '-Denvironment=test', '-Ppackage-app,package-vanilla,jacoco,run-its'], '11')
-                        }
-                    }
-
-                    stage('Archive') {
-                        /* Archive the test results */
-                        junit '**/target/surefire-reports/TEST-*.xml'
-
-                        if (label == 'linux') {
-                            infra.prepareToPublishIncrementals()
-                            
-                            recordIssues(
-                              enabledForFailure: true, aggregatingResults: true, 
-                              tools: [java(), spotBugs(pattern: '**/target/spotbugsXml.xml')]
-                            )
-
-                            publishCoverage adapters: [jacocoAdapter(mergeToOneReport: true, path: 'vanilla-package/target/site/jacoco-aggregate/*.xml')]
-                        }
-                    }
-                }
-            }
-        }
-    }
+stage 'Checkout'
+ node('slave') {
+  deleteDir()
+  checkout scm
 }
 
-/* Execute our platforms in parallel */
-parallel(branches)
+stage 'Build & Archive Apk'
+ node('slave') {
+  sh 'export ANDROID_SERIAL=192.168.56.101:5555 ; ./build.sh'
+  step([$class: 'ArtifactArchiver', artifacts: 'meu_aplicativo/build/outputs/apk/meu_aplicativo.apk'])
+ }
 
-// TODO: Rework Custom WAR Packager
-/*
-stage('Verify Custom WAR Packager demo')
-Map demos = [:]
-demos['cwp'] = {
-    node('docker') {
-        timestamps {
-            ws("cwp_${branchName}_${buildNumber}") {
-                checkout scm
-                stage('CWP') {
-                    dir('demo/cwp') {
-                        sh "make clean buildInDocker run"
-                    }
-                }
-            }
-        }
-    }
+stage 'Run Tests'
+ node('slave') {
+  sh 'export ANDROID_SERIAL=192.168.56.101:5555 ; ./runtests.sh'
+  publishHTML(target: [reportDir: 'meu_aplicativo_testes/build/reports/androidTests/connected/', reportFiles: 'index.html', reportName: 'Testes Instrumentados'])
+  step([$class: 'JUnitResultArchiver', testResults: 'meu_aplicativo_testes/build/outputs/androidTest-results/connected/*.xml'])
 }
-
-parallel(demos)*/
-
-// TODO: Run integration tests
-
-infra.maybePublishIncrementals()
